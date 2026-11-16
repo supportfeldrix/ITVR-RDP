@@ -4,11 +4,43 @@ import EditorModal from './EditorModal.jsx';
 import SshSession from './SshSession.jsx';
 import CredentialsModal from './CredentialsModal.jsx';
 import RdmImportModal from './RdmImportModal.jsx';
+import logoUrl from './assets/logo.png';
 
 const TypeIcon = ({ type, open }) => {
   if (type === 'folder') return <span className="ti folder" aria-hidden="true">{open ? '▾' : '▸'}<span className="fold-ico" /></span>;
   return <span className={`ti badge-${type}`} aria-hidden="true">{type === 'ssh' ? '>_' : '⧉'}</span>;
 };
+
+const LAYOUTS = [1, 2, 4];
+const DRAG_TYPE = 'application/x-itvr-tab';
+const cell = (slot) => ({ gridColumn: (slot % 2) + 1, gridRow: Math.floor(slot / 2) + 1 });
+
+// Keeps sessions already on screen where they are, makes sure `prefer` is shown,
+// then fills empty slots with the remaining open sessions in tab order.
+function arrange(n, tabList, current, prefer) {
+  const open = new Set(tabList.map((t) => t.key));
+  const slots = [0, 1, 2, 3].map((i) => (i < n && open.has(current[i]) ? current[i] : null));
+  const shown = () => slots.slice(0, n);
+  if (prefer && open.has(prefer) && !shown().includes(prefer)) {
+    const e = shown().indexOf(null);
+    slots[e >= 0 ? e : 0] = prefer;
+  }
+  for (const t of tabList) {
+    if (shown().includes(t.key)) continue;
+    const e = shown().indexOf(null);
+    if (e < 0) break;
+    slots[e] = t.key;
+  }
+  return slots;
+}
+
+const LayoutIcon = ({ n }) => (
+  <svg width="16" height="12" viewBox="0 0 16 12" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4">
+    <rect x="0.7" y="0.7" width="14.6" height="10.6" rx="1.5" />
+    {n >= 2 && <line x1="8" y1="0.7" x2="8" y2="11.3" />}
+    {n === 4 && <line x1="0.7" y1="6" x2="15.3" y2="6" />}
+  </svg>
+);
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -28,6 +60,11 @@ export default function App() {
   const [newMenu, setNewMenu] = useState(false);
   const [quick, setQuick] = useState({ host: '', type: 'rdp' });
   const [toast, setToast] = useState('');
+  // Split view: 1, 2 (side by side) or 4 (2x2) panes. panes[i] = tab key shown in slot i.
+  const [layout, setLayout] = useState(() => (LAYOUTS.includes(Number(localStorage.getItem('itvr.layout'))) ? Number(localStorage.getItem('itvr.layout')) : 1));
+  const [panes, setPanes] = useState([null, null, null, null]);
+  const [focusPane, setFocusPane] = useState(0);
+  const [dropSlot, setDropSlot] = useState(-1);
 
   const reload = useCallback(async () => {
     const [list, creds] = await Promise.all([window.api.list(), window.api.credList()]);
@@ -67,11 +104,79 @@ export default function App() {
   };
 
   // ---- sessions ----
+  const split = layout > 1;
+  const showGrid = split && activeTab !== 'dashboard';
+
   const openTab = (conn, extra = {}) => {
     const key = `${conn.id || conn.host}-${Date.now()}`;
     setTabs((t) => [...t, { key, conn, status: 'connecting', ...extra }]);
+    if (split) {
+      // New session goes into the first empty pane, otherwise into the focused one.
+      const empty = panes.slice(0, layout).indexOf(null);
+      const slot = empty >= 0 ? empty : focusPane;
+      setPanes((p) => p.map((k, i) => (i === slot ? key : k)));
+      setFocusPane(slot);
+    }
     setActiveTab(key);
   };
+
+  // Tab click: in split view, focus the pane already showing it, or show it in the focused pane.
+  const showTab = (key) => {
+    if (!split || key === 'dashboard') return setActiveTab(key);
+    const at = panes.slice(0, layout).indexOf(key);
+    if (at >= 0) setFocusPane(at);
+    else setPanes((p) => p.map((k, i) => (i === focusPane ? key : k)));
+    setActiveTab(key);
+  };
+
+  // Drop a tab on a pane; if it was already in another pane, the two swap.
+  const placeInPane = (slot, key) => {
+    setPanes((p) => {
+      const n = [...p];
+      const from = n.slice(0, layout).indexOf(key);
+      if (from >= 0) n[from] = n[slot];
+      n[slot] = key;
+      return n;
+    });
+    setFocusPane(slot);
+    setActiveTab(key);
+  };
+
+  const changeLayout = (n) => {
+    localStorage.setItem('itvr.layout', String(n));
+    const focusedKey = activeTab !== 'dashboard' && activeTab !== '__grid' ? activeTab : null;
+    setLayout(n);
+    if (n === 1) {
+      setActiveTab(focusedKey || tabs[0]?.key || 'dashboard');
+      return;
+    }
+    const slots = arrange(n, tabs, panes, focusedKey);
+    const f = Math.max(0, slots.indexOf(focusedKey));
+    setPanes(slots);
+    setFocusPane(f);
+    setActiveTab(slots[f] || '__grid');
+  };
+
+  const paneProps = (slot, key) => ({
+    className: `pane${slot === focusPane ? ' pane-focused' : ''}${dropSlot === slot ? ' pane-drop' : ''}`,
+    style: cell(slot),
+    onMouseDownCapture: () => {
+      if (slot !== focusPane) setFocusPane(slot);
+      setActiveTab(key || '__grid');
+    },
+    onDragOver: (e) => {
+      if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (dropSlot !== slot) setDropSlot(slot);
+    },
+    onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDropSlot(-1); },
+    onDrop: (e) => {
+      const k = e.dataTransfer.getData(DRAG_TYPE);
+      setDropSlot(-1);
+      if (k && tabs.some((t) => t.key === k)) { e.preventDefault(); placeInPane(slot, k); }
+    },
+  });
 
   const connect = async (conn, { external = false } = {}) => {
     if (!conn || conn.type === 'folder') return;
@@ -121,12 +226,22 @@ export default function App() {
   const toggleFav = async (c) => { await window.api.save({ ...c, favorite: !c.favorite }); reload(); };
 
   const closeTab = (key) => {
-    setTabs((t) => {
-      const idx = t.findIndex((x) => x.key === key);
-      const next = t.filter((x) => x.key !== key);
-      setActiveTab((a) => (a === key ? (next[idx - 1] || next[idx])?.key || 'dashboard' : a));
-      return next;
-    });
+    const idx = tabs.findIndex((x) => x.key === key);
+    const next = tabs.filter((x) => x.key !== key);
+    setTabs(next);
+    if (split) {
+      // Refill the freed pane with a session that is open but not on screen.
+      const freed = panes.map((k) => (k === key ? null : k));
+      const slot = panes.indexOf(key);
+      if (slot >= 0 && slot < layout) {
+        const hidden = next.find((t) => !freed.slice(0, layout).includes(t.key));
+        if (hidden) freed[slot] = hidden.key;
+      }
+      setPanes(freed);
+      if (activeTab === key) setActiveTab(freed[focusPane] || '__grid');
+    } else if (activeTab === key) {
+      setActiveTab((next[idx - 1] || next[idx])?.key || 'dashboard');
+    }
   };
   const setStatus = useCallback((key, status) => setTabs((t) => t.map((x) => (x.key === key ? { ...x, status } : x))), []);
   const setSession = useCallback((key, sessionId) => setTabs((t) => t.map((x) => (x.key === key ? { ...x, sessionId } : x))), []);
@@ -163,7 +278,7 @@ export default function App() {
     <div className="shell">
       {/* ---------- top toolbar ---------- */}
       <header className="topbar">
-        <div className="brand"><span className="logo">IT</span>ITVR RDP</div>
+        <div className="brand"><img className="logo" src={logoUrl} alt="" width="26" height="26" />ITVR RDP</div>
         <div className="tool-group">
           <div className="dropdown">
             <button className="tbtn" onClick={(e) => { e.stopPropagation(); setNewMenu((v) => !v); }} title="New entry">＋ New ▾</button>
@@ -219,20 +334,39 @@ export default function App() {
 
         {/* ---------- content ---------- */}
         <main className="content">
-          <div className="tabbar" role="tablist">
-            <div role="tab" aria-selected={activeTab === 'dashboard'} className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveTab('dashboard')}>
-              <span className="tab-ico">⌂</span> Dashboard
-            </div>
-            {tabs.map((t) => (
-              <div key={t.key} role="tab" aria-selected={activeTab === t.key} className={`tab ${activeTab === t.key ? 'active' : ''}`} onClick={() => setActiveTab(t.key)}
-                onAuxClick={(e) => e.button === 1 && closeTab(t.key)} title={`${t.conn.name} (${t.conn.host})`}>
-                <span className={`dot ${t.status}`} />{tabIcon(t)} {t.conn.name}
-                <button className="x" onClick={(e) => { e.stopPropagation(); closeTab(t.key); }} aria-label={`Close ${t.conn.name}`}>×</button>
+          <div className="tabrow">
+            <div className="tabbar" role="tablist">
+              <div role="tab" aria-selected={activeTab === 'dashboard'} className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveTab('dashboard')}>
+                <span className="tab-ico">⌂</span> Dashboard
               </div>
-            ))}
+              {tabs.map((t) => {
+                const onScreen = showGrid && panes.slice(0, layout).includes(t.key);
+                return (
+                  <div key={t.key} role="tab" aria-selected={activeTab === t.key}
+                    className={`tab ${activeTab === t.key ? 'active' : ''} ${onScreen && activeTab !== t.key ? 'shown' : ''}`}
+                    onClick={() => showTab(t.key)}
+                    onAuxClick={(e) => e.button === 1 && closeTab(t.key)}
+                    draggable={split}
+                    onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, t.key); e.dataTransfer.effectAllowed = 'move'; }}
+                    onDragEnd={() => setDropSlot(-1)}
+                    title={`${t.conn.name} (${t.conn.host})${split ? ' · drag onto a pane' : ''}`}>
+                    <span className={`dot ${t.status}`} />{tabIcon(t)} {t.conn.name}
+                    <button className="x" onClick={(e) => { e.stopPropagation(); closeTab(t.key); }} aria-label={`Close ${t.conn.name}`}>×</button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="layout-switch" role="group" aria-label="Split view">
+              {LAYOUTS.map((n) => (
+                <button key={n} className={layout === n ? 'on' : ''} aria-pressed={layout === n} onClick={() => changeLayout(n)}
+                  title={n === 1 ? 'Single view' : n === 2 ? 'Split view: 2 side by side' : 'Split view: 4 (2 x 2)'}>
+                  <LayoutIcon n={n} />
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="panes">
+          <div className={`panes${showGrid ? ` split split-${layout}` : ''}`}>
             {activeTab === 'dashboard' && (
               <Dashboard
                 selected={selected}
@@ -247,9 +381,22 @@ export default function App() {
                 onForgetCert={async (c) => { await window.api.forgetCert(c.id); flash('Pinned certificate removed. It will be trusted again on next connect.'); }}
               />
             )}
-            {tabs.map((t) => (t.conn.type === 'ssh'
-              ? <SshSession key={t.key} tab={t} active={activeTab === t.key} onStatus={setStatus} onSession={setSession} />
-              : <RdpTab key={t.key} tab={t} active={activeTab === t.key} onStatus={setStatus} />))}
+            {showGrid && panes.slice(0, layout).map((k, slot) => (k ? null : (
+              <EmptyPane key={`empty-${slot}`} pane={paneProps(slot, null)}
+                hidden={tabs.filter((t) => !panes.slice(0, layout).includes(t.key))}
+                onPick={(key) => placeInPane(slot, key)} />
+            )))}
+            {/* Sessions always render in this one keyed list, so moving them between
+                single view and split panes never remounts (and never disconnects) them. */}
+            {tabs.map((t) => {
+              const slot = showGrid ? panes.slice(0, layout).indexOf(t.key) : -1;
+              const visible = showGrid ? slot >= 0 : activeTab === t.key;
+              const focused = visible && (!showGrid || slot === focusPane);
+              const pane = showGrid && slot >= 0 ? paneProps(slot, t.key) : undefined;
+              return t.conn.type === 'ssh'
+                ? <SshSession key={t.key} tab={t} active={visible} focused={focused} pane={pane} onStatus={setStatus} onSession={setSession} />
+                : <RdpTab key={t.key} tab={t} active={visible} focused={focused} pane={pane} onStatus={setStatus} />;
+            })}
           </div>
         </main>
       </div>
@@ -333,6 +480,24 @@ export default function App() {
       )}
 
       {toast && <div className="toast" role="status">{toast}</div>}
+    </div>
+  );
+}
+
+function EmptyPane({ pane, hidden, onPick }) {
+  const { className = '', ...rest } = pane;
+  return (
+    <div className={`${className} pane-empty`} {...rest}>
+      <div className="pane-empty-title">Empty pane</div>
+      {hidden.length > 0 ? (
+        <select value="" onChange={(e) => e.target.value && onPick(e.target.value)} aria-label="Show an open session in this pane">
+          <option value="">Show an open session…</option>
+          {hidden.map((t) => <option key={t.key} value={t.key}>{t.conn.name} ({t.conn.host})</option>)}
+        </select>
+      ) : (
+        <div className="muted">Double-click an entry in the tree to connect here.</div>
+      )}
+      <div className="muted small">or drag a tab onto this pane</div>
     </div>
   );
 }

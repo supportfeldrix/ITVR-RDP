@@ -7,7 +7,9 @@ RDP and SSH connection manager for Windows and macOS, modelled on Remote Desktop
 - `npm start` builds and runs; `npm run dev` for hot reload
 - `npm test` runs the unit suites (NTLM, RD Gateway protocol, store, RDM import, SFTP)
 - `npm run smoke` runs an end-to-end UI smoke test against a throwaway profile
-- `npm run dist:win` / `npm run dist:mac` for installers (build the Mac one on a Mac)
+- `npm run dist:win` for the Windows installer, portable `.exe` and ZIP
+- `npm run dist:mac-from-win` builds unsigned macOS zips (arm64 + x64) on Windows
+  (`scripts/build-mac.js`; `npm run dist:mac` on a Mac gives a proper `.dmg`)
 
 If the Electron binary is missing behind the corporate proxy, set `NODE_USE_ENV_PROXY=1`
 and `HTTPS_PROXY`, then run `node node_modules/electron/install.js`.

@@ -27,6 +27,7 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 600,
     title: 'ITVR RDP',
+    icon: path.join(__dirname, '..', 'build', 'icon.png'),
     backgroundColor: '#1b1d22',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -42,6 +43,19 @@ function createWindow() {
   });
   if (isDev) win.loadURL('http://localhost:5173');
   else win.loadURL('app://itvr/index.html');
+}
+
+// One instance only: a second launch (e.g. double-clicking the portable exe again while it
+// is still unpacking) just brings the existing window to the front.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
 }
 
 app.whenReady().then(async () => {

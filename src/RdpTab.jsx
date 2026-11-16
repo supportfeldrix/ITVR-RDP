@@ -21,7 +21,8 @@ function errText(e) {
 }
 
 // One embedded RDP session. Stays mounted while hidden so it survives tab switches.
-export default function RdpTab({ tab, active, onStatus }) {
+// `pane` (split view) carries the grid placement, focus/drop handlers and classes.
+export default function RdpTab({ tab, active, focused = active, onStatus, pane }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
   const sessionRef = useRef(null);
@@ -234,9 +235,10 @@ export default function RdpTab({ tab, active, onStatus }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send]);
 
+  // Only the focused pane takes the keyboard; others stay visible but idle.
   useEffect(() => {
-    if (active && state === 'connected') requestAnimationFrame(() => canvasRef.current?.focus());
-  }, [active, state]);
+    if (focused && state === 'connected') requestAnimationFrame(() => canvasRef.current?.focus());
+  }, [focused, state]);
 
   const ctrlAltDel = () => {
     const i = ironRef.current;
@@ -257,11 +259,13 @@ export default function RdpTab({ tab, active, onStatus }) {
   };
   const fullscreen = () => wrapRef.current?.parentElement?.requestFullscreen?.();
 
+  const { className: paneClass = '', style: paneStyle, ...paneEvents } = pane || {};
+
   return (
-    <div className="session" style={{ display: active ? 'flex' : 'none' }}>
+    <div className={`session ${paneClass}`} style={{ display: active ? 'flex' : 'none', ...paneStyle }} {...paneEvents}>
       <div className="session-bar">
         <span className={`dot ${state}`} />
-        <span className="session-title">{tab.conn.name} <span className="muted">{tab.conn.host}</span></span>
+        <span className="session-title" title={`${tab.conn.name} (${tab.conn.host})`}>{tab.conn.name} <span className="muted">{tab.conn.host}</span></span>
         <div className="spacer" />
         <button onClick={ctrlAltDel} disabled={state !== 'connected'} title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
         <button onClick={sendWinKey} disabled={state !== 'connected'} title="Send Windows key">Win</button>

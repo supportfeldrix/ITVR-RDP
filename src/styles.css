@@ -25,7 +25,7 @@ input[type=checkbox] { width: auto; }
 .shell { display: flex; flex-direction: column; height: 100%; }
 .topbar { display: flex; align-items: center; gap: 14px; height: 42px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; white-space: nowrap; }
-.logo { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 5px; background: linear-gradient(135deg, #2f7de1, #7c4dff); font-size: 11px; font-weight: 700; color: #fff; }
+.logo { display: block; width: 26px; height: 26px; object-fit: contain; }
 .tool-group { display: flex; gap: 4px; }
 .tbtn { background: transparent; border-color: transparent; padding: 5px 9px; }
 .tbtn:hover:not(:disabled) { background: var(--hover); border-color: var(--line); }
@@ -180,3 +180,31 @@ legend { padding: 0 6px; color: var(--muted); font-size: 12px; }
 .sftp-list tbody tr.sel { background: var(--sel); }
 .fi { margin-right: 6px; }
 .sftp-msg { padding: 6px 10px; border-top: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
+
+/* ---------- split view ---------- */
+.tabrow { display: flex; align-items: stretch; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tabrow .tabbar { flex: 1; min-width: 0; border-bottom: 0; }
+.tab.shown { color: var(--text); box-shadow: inset 0 2px #4a5a75; }
+.tab[draggable="true"] { cursor: grab; }
+.layout-switch { display: flex; align-items: center; gap: 2px; padding: 0 8px; border-left: 1px solid var(--line); }
+.layout-switch button { display: grid; place-items: center; width: 28px; height: 24px; padding: 0; background: none; border: 1px solid transparent; color: var(--muted); }
+.layout-switch button:hover { color: var(--text); background: var(--hover); }
+.layout-switch button.on { color: var(--text); background: var(--hover); border-color: var(--line); }
+
+.panes.split { display: grid; gap: 3px; background: #0b0c0e; padding: 3px; }
+.panes.split-2 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+.panes.split-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.panes.split > .pane { min-width: 0; min-height: 0; position: relative; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.panes.split > .pane.pane-focused { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.panes.split > .pane.pane-drop { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); background-color: #14213a; }
+.pane-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: var(--bg); text-align: center; padding: 16px; }
+.pane-empty-title { font-size: 14px; font-weight: 600; color: var(--muted); }
+.pane-empty select { max-width: 90%; }
+.small { font-size: 12px; }
+
+/* Narrow panes: keep the session toolbar on one line and let the title shrink. */
+.session-bar { min-width: 0; overflow: hidden; }
+.session-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-bar > button, .session-bar > select { flex: none; }
+.split-4 .session-bar select { max-width: 120px; }
+.split-4 .sftp { width: 300px; min-width: 220px; }

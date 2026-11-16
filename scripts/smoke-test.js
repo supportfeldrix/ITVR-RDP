@@ -12,7 +12,11 @@ const WebSocket = require('ws');
 const PORT = 9600;
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'itvr-smoke-'));
 const electron = require('electron');
-const app = spawn(electron, [path.join(__dirname, '..'), `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+// APP_EXE=path\to\packaged.exe tests the packaged build instead of the dev tree.
+const flags = [`--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`];
+const app = process.env.APP_EXE
+  ? spawn(process.env.APP_EXE, flags, { stdio: ['ignore', 'pipe', 'pipe'] })
+  : spawn(electron, [path.join(__dirname, '..'), ...flags], { stdio: ['ignore', 'pipe', 'pipe'] });
 let mainLog = '';
 app.stdout.on('data', (d) => (mainLog += d));
 app.stderr.on('data', (d) => (mainLog += d));
@@ -56,7 +60,8 @@ function finish(code) {
   await call('Runtime.enable');
   assert.ok(await waitFor('!!document.querySelector(".tree")'), 'UI did not render');
   assert.strictEqual(await js('document.title'), 'ITVR RDP');
-  step('app starts and renders');
+  assert.ok(await waitFor('(() => { const i = document.querySelector(".brand img.logo"); return !!i && i.complete && i.naturalWidth > 0; })()'), 'logo image did not load');
+  step('app starts and renders (logo loaded)');
 
   // ---- shared credentials through the real IPC layer ----
   const r = await js(`(async () => {
@@ -123,6 +128,73 @@ function finish(code) {
   await js(`document.querySelector('.modal').requestSubmit()`);
   assert.ok(await waitFor('document.querySelector(".session[style*=flex] .rdp-overlay")?.innerText.includes("Could not reach the server") || document.querySelector(".session[style*=flex] .rdp-overlay")?.innerText.includes("Cannot reach")', 20000), 'direct failure');
   step('direct RDP failure path still reports an error');
+
+  // ---- split view ----
+  const quickOpen = async (host) => {
+    await js(`(() => { const i = document.getElementById('quick-host'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, 'u@${host}'); i.dispatchEvent(new Event('input', { bubbles: true })); i.form.requestSubmit(); return true; })()`);
+    assert.ok(await waitFor('!!document.querySelector(".modal input[type=password]")'));
+    await js(`document.querySelector('.modal').requestSubmit()`);
+    await sleep(400);
+  };
+  const visibleSessions = () => js(`[...document.querySelectorAll('.panes > .session')].filter((s) => s.style.display !== 'none').map((s) => s.querySelector('.session-title').childNodes[0].textContent.trim())`);
+  const layoutBtn = (n) => js(`document.querySelectorAll('.layout-switch button')[${[1, 2, 4].indexOf(n)}].click()`);
+
+  // Two sessions are already open from the steps above (gateway entry + quick 127.0.0.1:3389).
+  assert.strictEqual(await js(`document.querySelectorAll('.panes > .session').length`), 2, 'expected 2 open sessions before split tests');
+  // Mark the first session's DOM node; if split view remounted it, the mark would be gone.
+  await js(`document.querySelectorAll('.panes > .session')[0].__itvrMark = 'same-node'; true`);
+
+  await layoutBtn(4);
+  await sleep(300);
+  assert.ok(await js('!!document.querySelector(".panes.split.split-4")'), '4-pane grid not shown');
+  assert.strictEqual((await visibleSessions()).length, 2, 'both open sessions should be on screen');
+  assert.strictEqual(await js('document.querySelectorAll(".pane-empty").length'), 2, 'two empty panes expected');
+  const cells = await js(`[...document.querySelectorAll('.panes > .pane')].map((p) => p.style.gridColumn + '/' + p.style.gridRow).sort().join(' ')`);
+  assert.strictEqual(cells, '1/1 1/2 2/1 2/2', `grid cells: ${cells}`);
+  assert.strictEqual(await js(`document.querySelectorAll('.panes > .session')[0].__itvrMark`), 'same-node', 'session was remounted when entering split view');
+  step('4-pane view: 2 sessions + 2 empty panes, sessions not remounted');
+
+  // Opening another session fills an empty pane and gets focus.
+  await quickOpen('127.0.0.1:3392');
+  assert.strictEqual((await visibleSessions()).length, 3);
+  assert.strictEqual(await js('document.querySelectorAll(".pane-empty").length'), 1);
+  assert.ok(await js(`document.querySelector('.pane-focused .session-title')?.textContent.includes('3392')`), 'new session should be in the focused pane');
+  step('new session fills an empty pane and is focused');
+
+  // Clicking a pane focuses it.
+  await js(`(() => { const p = [...document.querySelectorAll('.panes > .session')].find((s) => s.style.display !== 'none' && !s.classList.contains('pane-focused')); p.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return true; })()`);
+  await sleep(200);
+  assert.strictEqual(await js('document.querySelectorAll(".pane-focused").length'), 1, 'exactly one focused pane');
+  step('clicking a pane moves focus to it');
+
+  // 2-pane view keeps two, the third stays open (hidden) and can be shown via its tab.
+  await layoutBtn(2);
+  await sleep(300);
+  assert.ok(await js('!!document.querySelector(".panes.split-2")'));
+  assert.strictEqual((await visibleSessions()).length, 2);
+  assert.strictEqual(await js('document.querySelectorAll(".pane-empty").length'), 0);
+  const hiddenName = await js(`[...document.querySelectorAll('.tabbar .tab')].slice(1).find((t) => !t.classList.contains('active') && !t.classList.contains('shown'))?.innerText`);
+  assert.ok(hiddenName, 'one session tab should be off screen');
+  await js(`[...document.querySelectorAll('.tabbar .tab')].slice(1).find((t) => !t.classList.contains('active') && !t.classList.contains('shown')).click()`);
+  await sleep(300);
+  assert.ok(await js(`document.querySelector('.pane-focused .session-title')?.textContent.trim().length > 0`));
+  assert.strictEqual((await visibleSessions()).length, 2);
+  step('2-pane view; clicking an off-screen tab shows it in the focused pane');
+
+  // Closing a session in split view refills the pane with an off-screen one.
+  await js(`document.querySelector('.tabbar .tab.active .x').click()`);
+  await sleep(300);
+  assert.strictEqual((await visibleSessions()).length, 2, 'freed pane should be refilled');
+  step('closing a tab refills its pane');
+
+  // Back to single view: exactly one session visible, session nodes still the same.
+  await layoutBtn(1);
+  await sleep(300);
+  assert.ok(!(await js('!!document.querySelector(".panes.split")')));
+  assert.strictEqual((await visibleSessions()).length, 1);
+  assert.strictEqual(await js(`[...document.querySelectorAll('.panes > .session')].some((s) => s.__itvrMark === 'same-node')`), true, 'session remounted on leaving split view');
+  assert.strictEqual(await js(`localStorage.getItem('itvr.layout')`), '1');
+  step('single view restored without remounting sessions');
 
   const real = errors.filter((e) => !/Autofill|DevTools/.test(e));
   assert.deepStrictEqual(real, [], `renderer errors: ${real.join(' | ')}`);

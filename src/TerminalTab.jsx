@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 
 // One SSH session rendered in an xterm.js terminal. Stays mounted while hidden
 // so the session survives tab switches.
-export default function TerminalTab({ tab, active, onStatus, onSession }) {
+export default function TerminalTab({ tab, active, focused = active, onStatus, onSession }) {
   const hostRef = useRef(null);
   const termRef = useRef(null);
   const fitRef = useRef(null);
@@ -67,14 +67,13 @@ export default function TerminalTab({ tab, active, onStatus, onSession }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Visible: re-fit to the (possibly new) pane size. Focused: take the keyboard.
   useEffect(() => {
-    if (active) {
-      requestAnimationFrame(() => {
-        fitRef.current?.fit();
-        termRef.current?.focus();
-      });
-    }
+    if (active) requestAnimationFrame(() => fitRef.current?.fit());
   }, [active]);
+  useEffect(() => {
+    if (focused) requestAnimationFrame(() => termRef.current?.focus());
+  }, [focused]);
 
   return <div className="terminal-host" ref={hostRef} style={{ display: active ? 'block' : 'none' }} />;
 }
