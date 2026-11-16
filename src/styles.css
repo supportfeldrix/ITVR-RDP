@@ -208,3 +208,14 @@ legend { padding: 0 6px; color: var(--muted); font-size: 12px; }
 .session-bar > button, .session-bar > select { flex: none; }
 .split-4 .session-bar select { max-width: 120px; }
 .split-4 .sftp { width: 300px; min-width: 220px; }
+
+/* ---------- multi-execute ---------- */
+.layout-switch .multi-toggle { width: auto; padding: 0 9px; margin-left: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.layout-switch .multi-toggle:disabled { opacity: .4; }
+.layout-switch .multi-toggle.on { background: #8a5a00; border-color: #f0a30a; color: #fff; }
+.multi-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 12px; background: #4a3300; border-bottom: 1px solid #f0a30a; color: #ffd98a; font-size: 12px; }
+.multi-banner button { padding: 2px 12px; background: #f0a30a; border-color: #f0a30a; color: #1b1300; font-weight: 600; }
+.panes.split > .pane.pane-multi { border-color: #f0a30a; }
+.panes.split > .pane.pane-multi.pane-focused { box-shadow: 0 0 0 1px #f0a30a; }
+.multi-btn { font-size: 12px; white-space: nowrap; }
+.multi-btn.on { background: #6b4600; border-color: #f0a30a; color: #ffd98a; }

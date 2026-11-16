@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('api', {
   exportAll: () => ipcRenderer.invoke('conn:export'),
   importAll: () => ipcRenderer.invoke('conn:import'),
   pickKey: () => ipcRenderer.invoke('dialog:pickKey'),
+  clipboardRead: () => ipcRenderer.invoke('clipboard:readText'),
+  clipboardWrite: (text) => ipcRenderer.invoke('clipboard:writeText', text),
 
   // shared credentials
   credList: () => ipcRenderer.invoke('cred:list'),

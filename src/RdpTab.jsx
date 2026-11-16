@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { loadIronRdp } from './rdp/ironrdp.js';
 import { SCANCODES } from './rdp/scancodes.js';
+import { isPasteShortcut, scancodeFor } from './inputBus.mjs';
+
+const IS_MAC = window.api?.platform === 'darwin';
 
 const even = (n) => Math.max(2, Math.floor(n / 2) * 2);
 
@@ -22,11 +25,13 @@ function errText(e) {
 
 // One embedded RDP session. Stays mounted while hidden so it survives tab switches.
 // `pane` (split view) carries the grid placement, focus/drop handlers and classes.
-export default function RdpTab({ tab, active, focused = active, onStatus, pane }) {
+export default function RdpTab({ tab, active, focused = active, onStatus, pane, bus, multi }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
   const sessionRef = useRef(null);
   const ironRef = useRef(null);
+  const lastClipRef = useRef(''); // last text exchanged with the remote clipboard (stops echo loops)
+  const queueRef = useRef(Promise.resolve()); // keeps key events in order while a clipboard sync is pending
   const [state, setState] = useState('connecting'); // connecting | connected | closed
   const [message, setMessage] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -96,10 +101,14 @@ export default function RdpTab({ tab, active, focused = active, onStatus, pane }
           b.remoteClipboardChangedCallback((data) => {
             try {
               const item = data.items().find((i) => i.mimeType() === 'text/plain');
-              if (item) navigator.clipboard.writeText(String(item.value())).catch(() => {});
+              if (item) {
+                const text = String(item.value());
+                lastClipRef.current = text;
+                window.api.clipboardWrite(text).catch(() => {});
+              }
             } catch { /* ignore */ }
           });
-          b.forceClipboardUpdateCallback(async () => pushClipboard());
+          b.forceClipboardUpdateCallback(async () => syncClipboard());
         }
 
         session = await b.connect();
@@ -133,18 +142,23 @@ export default function RdpTab({ tab, active, focused = active, onStatus, pane }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt]);
 
-  async function pushClipboard() {
+  // Send the laptop clipboard to the remote when it has changed. Read through the main process
+  // (always available), and never send an empty clipboard: that would wipe the remote's.
+  async function syncClipboard() {
+    if (tab.conn.redirectClipboard === false) return;
     const s = sessionRef.current;
     const iron = ironRef.current;
     if (!s || !iron) return;
-    const data = new iron.ClipboardData();
+    let text = '';
+    try { text = await window.api.clipboardRead(); } catch { return; }
+    if (!text || text === lastClipRef.current) return;
     try {
-      const text = await navigator.clipboard.readText();
-      if (text) data.addText('text/plain', text);
-    } catch { /* clipboard not readable */ }
-    try { await s.onClipboardPaste(data); } catch { /* ignore */ }
+      const data = new iron.ClipboardData();
+      data.addText('text/plain', text);
+      await s.onClipboardPaste(data);
+      lastClipRef.current = text;
+    } catch { /* channel not ready yet; the next sync retries */ }
   }
-
   // ---- dynamic resolution: follow the tab size like RDM's "adapt to window" ----
   useEffect(() => {
     if (tab.conn.dynamicResolution === false) return undefined;
@@ -170,6 +184,35 @@ export default function RdpTab({ tab, active, focused = active, onStatus, pane }
     return () => { clearTimeout(timer); ro.disconnect(); };
   }, [tab.conn.dynamicResolution, scale]);
 
+  // Press/release a key on this session. All keys go through one queue so that a paste shortcut can
+  // wait for the clipboard sync without letting later keys (e.g. the Ctrl release) overtake it.
+  const applyKey = useCallback((sc, down, paste) => {
+    queueRef.current = queueRef.current.then(async () => {
+      const iron = ironRef.current;
+      if (!iron || !sessionRef.current) return;
+      if (paste) await syncClipboard();
+      send([down ? iron.DeviceEvent.keyPressed(sc) : iron.DeviceEvent.keyReleased(sc)]);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [send]);
+
+  // Multi-execute: keys typed in another RDP pane arrive here.
+  useEffect(() => {
+    if (!bus) return undefined;
+    return bus.register(tab.key, (ev) => {
+      if (ev.kind === 'key' && sessionRef.current) applyKey(ev.sc, ev.down, ev.paste);
+    });
+  }, [bus, tab.key, applyKey]);
+
+  // Keep the remote clipboard current while this pane is in use, so right-click paste works too.
+  useEffect(() => {
+    if (!focused || state !== 'connected') return undefined;
+    syncClipboard();
+    const timer = setInterval(() => { if (document.hasFocus()) syncClipboard(); }, 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focused, state]);
+
   // ---- input ----
   useEffect(() => {
     const c = canvasRef.current;
@@ -185,11 +228,13 @@ export default function RdpTab({ tab, active, focused = active, onStatus, pane }
       return [Math.min(c.width - 1, Math.max(0, x)), Math.min(c.height - 1, Math.max(0, y))];
     };
     const key = (down) => (e) => {
-      const sc = SCANCODES[e.code];
+      const sc = scancodeFor(e.code, SCANCODES, IS_MAC);
       if (sc === undefined || !iron()) return;
       e.preventDefault();
       e.stopPropagation();
-      send([down ? iron().DeviceEvent.keyPressed(sc) : iron().DeviceEvent.keyReleased(sc)]);
+      const paste = down && isPasteShortcut(e);
+      applyKey(sc, down, paste);
+      if (bus) bus.emit(tab.key, { kind: 'key', down, sc, paste });
     };
     const onMove = (e) => iron() && send([iron().DeviceEvent.mouseMove(...pos(e))]);
     const onDown = (e) => {
@@ -207,7 +252,7 @@ export default function RdpTab({ tab, active, focused = active, onStatus, pane }
       send(ev);
     };
     const onBlur = () => { try { sessionRef.current?.releaseAllInputs(); } catch { /* ignore */ } };
-    const onFocus = () => { if (tab.conn.redirectClipboard !== false) pushClipboard(); };
+    const onFocus = () => { syncClipboard(); };
     const noMenu = (e) => e.preventDefault();
     const kd = key(true);
     const ku = key(false);
@@ -267,6 +312,12 @@ export default function RdpTab({ tab, active, focused = active, onStatus, pane }
         <span className={`dot ${state}`} />
         <span className="session-title" title={`${tab.conn.name} (${tab.conn.host})`}>{tab.conn.name} <span className="muted">{tab.conn.host}</span></span>
         <div className="spacer" />
+        {multi?.active && (
+          <button className={`multi-btn${multi.included ? ' on' : ''}`} onClick={multi.toggle} aria-pressed={multi.included}
+            title={multi.included ? 'This pane receives multi-execute input. Click to exclude it.' : 'This pane is excluded from multi-execute. Click to include it.'}>
+            {multi.included ? '⇉ In multi-execute' : '✕ Excluded'}
+          </button>
+        )}
         <button onClick={ctrlAltDel} disabled={state !== 'connected'} title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
         <button onClick={sendWinKey} disabled={state !== 'connected'} title="Send Windows key">Win</button>
         <select value={scale} onChange={(e) => setScale(e.target.value)} title="Display mode" aria-label="Display mode">

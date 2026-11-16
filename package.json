@@ -9,7 +9,7 @@
     "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron . --dev\"",
     "build": "vite build",
     "start": "vite build && electron .",
-    "test": "node scripts/ntlm-test.js && node scripts/gateway-test.js && node scripts/store-test.js && node scripts/rdm-test.js && node scripts/sftp-test.js",
+    "test": "node scripts/bus-test.mjs && node scripts/ntlm-test.js && node scripts/gateway-test.js && node scripts/store-test.js && node scripts/rdm-test.js && node scripts/sftp-test.js",
     "smoke": "vite build && node scripts/smoke-test.js",
     "dist:win": "vite build && electron-builder --win",
     "dist:mac": "vite build && electron-builder --mac",

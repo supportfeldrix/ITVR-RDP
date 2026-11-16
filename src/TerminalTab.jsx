@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 
 // One SSH session rendered in an xterm.js terminal. Stays mounted while hidden
 // so the session survives tab switches.
-export default function TerminalTab({ tab, active, focused = active, onStatus, onSession }) {
+export default function TerminalTab({ tab, active, focused = active, onStatus, onSession, bus }) {
   const hostRef = useRef(null);
   const termRef = useRef(null);
   const fitRef = useRef(null);
@@ -27,7 +27,15 @@ export default function TerminalTab({ tab, active, focused = active, onStatus, o
 
     let offData = () => {};
     let offClosed = () => {};
+    let offBus = () => {};
     let disposed = false;
+
+    // Multi-execute mirrors only what the user typed or pasted. xterm also reports automatic replies to
+    // the server's terminal queries through onData; those must stay with their own session.
+    let lastUserInput = 0;
+    const markUser = () => { lastUserInput = performance.now(); };
+    const host = hostRef.current;
+    for (const ev of ['keydown', 'input', 'paste', 'compositionend']) host.addEventListener(ev, markUser, true);
 
     window.api
       .sshOpen({ id: tab.conn.id, cols: term.cols, rows: term.rows, password: tab.password, username: tab.promptUser })
@@ -42,7 +50,11 @@ export default function TerminalTab({ tab, active, focused = active, onStatus, o
           term.write(`\r\n\x1b[33m[Session closed${p.error ? ': ' + p.error : ''}]\x1b[0m\r\n`);
           onStatus(tab.key, 'closed');
         });
-        term.onData((d) => window.api.sshInput(sessionId, d));
+        term.onData((d) => {
+          window.api.sshInput(sessionId, d);
+          if (bus && performance.now() - lastUserInput < 150) bus.emit(tab.key, { kind: 'text', data: d });
+        });
+        if (bus) offBus = bus.register(tab.key, (e) => { if (e.kind === 'text' && sessionRef.current) window.api.sshInput(sessionRef.current, e.data); });
         term.onResize(({ cols, rows }) => window.api.sshResize(sessionId, cols, rows));
         window.api.sshResize(sessionId, term.cols, term.rows);
       })
@@ -58,6 +70,8 @@ export default function TerminalTab({ tab, active, focused = active, onStatus, o
 
     return () => {
       disposed = true;
+      for (const ev of ['keydown', 'input', 'paste', 'compositionend']) host.removeEventListener(ev, markUser, true);
+      offBus();
       ro.disconnect();
       offData();
       offClosed();

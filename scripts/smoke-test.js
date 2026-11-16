@@ -196,6 +196,95 @@ function finish(code) {
   assert.strictEqual(await js(`localStorage.getItem('itvr.layout')`), '1');
   step('single view restored without remounting sessions');
 
+  // ---- clipboard bridge (main process, not navigator.clipboard) ----
+  const clip = await js(`(async () => { const s = 'ITVR clip test é ✓ ' + Date.now(); await window.api.clipboardWrite(s); const back = await window.api.clipboardRead(); return { ok: back === s }; })()`);
+  assert.strictEqual(clip.ok, true, 'clipboard write/read round trip through the main process failed');
+  step('clipboard round trip through the main process');
+
+  // ---- multi-execute, end to end with a real in-process SSH server ----
+  const received = [];
+  const hostKey = require('crypto').generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+  const sshServer = new (require('ssh2').Server)({ hostKeys: [hostKey] }, (client) => {
+    const rec = { data: '' };
+    received.push(rec);
+    client.on('authentication', (ctx) => ctx.accept());
+    client.on('ready', () => client.on('session', (accept) => {
+      const session = accept();
+      session.on('pty', (acc) => acc && acc());
+      session.on('window-change', (acc) => acc && acc());
+      session.on('shell', (acc) => { const st = acc(); st.write('$ '); st.on('data', (d) => { rec.data += d.toString(); st.write(d); }); });
+    }));
+    client.on('error', () => {});
+  });
+  await new Promise((r) => sshServer.listen(0, '127.0.0.1', r));
+  const sshPort = sshServer.address().port;
+
+  await js(`(async () => { const a = window.api; for (const n of ['Multi A', 'Multi B', 'Multi C']) await a.save({ type: 'ssh', name: n, host: '127.0.0.1', port: ${sshPort}, username: 'u', password: 'p' }); return true; })()`);
+  await call('Page.reload');
+  await sleep(1500);
+  assert.ok(await waitFor('!!document.querySelector(".tree .node")'));
+  await js(`window.confirm = () => true; document.querySelector('.layout-switch button:nth-child(2)').click(); true`); // 2-pane view
+  await sleep(300);
+  const treeRoot = await js(`!![...document.querySelectorAll('.node .label')].find((l) => l.textContent === 'Multi A')`);
+  assert.ok(treeRoot, 'SSH test entries missing from the tree');
+  const openEntry = async (name) => js(`[...document.querySelectorAll('.node .label')].find((l) => l.textContent === ${JSON.stringify(name)}).closest('.node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await openEntry('Multi A');
+  assert.ok(await waitFor(`document.querySelectorAll('.tabbar .dot.connected').length >= 1`, 15000), 'first SSH session did not connect');
+  await openEntry('Multi B');
+  assert.ok(await waitFor(`document.querySelectorAll('.tabbar .dot.connected').length >= 2`, 15000), 'second SSH session did not connect');
+  assert.strictEqual(received.length, 2, 'fake server should have two connections');
+
+  // multi-execute is offered and needs confirmation (confirm is auto-accepted in this test)
+  assert.ok(await js(`!document.querySelector('.layout-switch .multi-toggle').disabled`), 'multi-execute button should be enabled with 2 connected panes');
+  await js(`document.querySelector('.layout-switch .multi-toggle').click(); true`);
+  assert.ok(await waitFor(`!!document.querySelector('.multi-banner')`), 'multi-execute banner not shown');
+  assert.ok(await js(`document.querySelectorAll('.pane-multi').length === 2`), 'both panes should be marked');
+  assert.ok(await js(`document.querySelector('.multi-banner').innerText.includes('2 included sessions')`));
+
+  // Type like a person: one real key event per character, then Enter.
+  const typeInFocused = async (text) => {
+    await js(`document.querySelector('.pane-focused .xterm-helper-textarea').focus(); true`);
+    const key = (ch) => (ch === ' ' ? { key: ' ', code: 'Space', vk: 32 } : { key: ch, code: /[a-z]/i.test(ch) ? `Key${ch.toUpperCase()}` : `Digit${ch}`, vk: ch.toUpperCase().charCodeAt(0) });
+    for (const ch of text) {
+      const k = key(ch);
+      await call('Input.dispatchKeyEvent', { type: 'keyDown', key: k.key, code: k.code, windowsVirtualKeyCode: k.vk, text: ch });
+      await call('Input.dispatchKeyEvent', { type: 'keyUp', key: k.key, code: k.code, windowsVirtualKeyCode: k.vk });
+    }
+    await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+    await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  };
+  const pasteInFocused = async (text) => js(`(() => {
+    const ta = document.querySelector('.pane-focused .xterm-helper-textarea'); ta.focus();
+    const dt = new DataTransfer(); dt.setData('text/plain', ${JSON.stringify(text)});
+    ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    return true; })()`);
+  const everyone = async (needle) => { for (let i = 0; i < 40; i++) { if (received.every((r) => r.data.includes(needle))) return true; await sleep(250); } return false; };  await typeInFocused('echo one');
+  assert.ok(await everyone('echo one'), `both servers should receive the typed text. Got: ${JSON.stringify(received.map((r) => r.data))}`);
+  assert.ok(received.every((r) => (r.data.match(/echo one/g) || []).length === 1), 'text must arrive exactly once per session (no echo loops)');
+  step('multi-execute: typing in one SSH pane reaches both servers exactly once');
+
+  await pasteInFocused('pasted-text');
+  assert.ok(await everyone('pasted-text'), `pasted text should reach both servers. Got: ${JSON.stringify(received.map((r) => r.data))}`);
+  assert.ok(received.every((r) => (r.data.match(/pasted-text/g) || []).length === 1), 'pasted text must arrive exactly once per session');
+  step('multi-execute: pasting in one SSH pane reaches both servers exactly once');
+
+  // Stop: input must go to the focused session only again
+  await js(`document.querySelector('.multi-banner button').click(); true`); // Stop
+  assert.ok(await waitFor(`!document.querySelector('.multi-banner')`));
+  await typeInFocused('echo solo');
+  await sleep(1200);
+  const solo = received.map((r) => r.data.includes('echo solo'));
+  assert.strictEqual(solo.filter(Boolean).length, 1, `after Stop only the focused session may receive input, got ${JSON.stringify(solo)}`);
+  step('stopping multi-execute returns to single-pane input');
+
+  // it switches itself off when fewer than two sessions are on screen
+  await js(`document.querySelector('.layout-switch .multi-toggle').click(); true`);
+  assert.ok(await waitFor(`!!document.querySelector('.multi-banner')`));
+  await js(`document.querySelector('.layout-switch button:nth-child(1)').click(); true`); // back to single view
+  assert.ok(await waitFor(`!document.querySelector('.multi-banner')`), 'multi-execute must turn off when leaving split view');
+  step('multi-execute turns itself off when leaving split view');
+  sshServer.close();
+
   const real = errors.filter((e) => !/Autofill|DevTools/.test(e));
   assert.deepStrictEqual(real, [], `renderer errors: ${real.join(' | ')}`);
   step('no renderer errors');

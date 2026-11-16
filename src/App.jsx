@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createInputBus } from './inputBus.mjs';
 import RdpTab from './RdpTab.jsx';
 import EditorModal from './EditorModal.jsx';
 import SshSession from './SshSession.jsx';
@@ -65,6 +66,9 @@ export default function App() {
   const [panes, setPanes] = useState([null, null, null, null]);
   const [focusPane, setFocusPane] = useState(0);
   const [dropSlot, setDropSlot] = useState(-1);
+  // Multi-execute: keyboard input in the focused pane is mirrored to the other included panes.
+  const [multiExec, setMultiExec] = useState(false);
+  const [excluded, setExcluded] = useState([]); // tab keys left out of multi-execute
 
   const reload = useCallback(async () => {
     const [list, creds] = await Promise.all([window.api.list(), window.api.credList()]);
@@ -106,6 +110,32 @@ export default function App() {
   // ---- sessions ----
   const split = layout > 1;
   const showGrid = split && activeTab !== 'dashboard';
+
+  // Sessions that take part: on screen, connected and not excluded.
+  const visibleKeys = showGrid ? panes.slice(0, layout).filter(Boolean) : [];
+  const participants = visibleKeys.filter((k) => !excluded.includes(k) && tabs.find((t) => t.key === k)?.status === 'connected');
+  const multiRef = useRef({ on: false, keys: [] });
+  multiRef.current = { on: multiExec && showGrid, keys: participants };
+  const bus = useMemo(() => createInputBus(() => multiRef.current), []);
+
+  // Safety: multi-execute switches itself off as soon as it could no longer reach two sessions.
+  useEffect(() => {
+    if (multiExec && (!showGrid || participants.length < 2)) {
+      setMultiExec(false);
+      flash('Multi-execute turned off: fewer than two connected sessions are on screen.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multiExec, showGrid, participants.length]);
+
+  const toggleMulti = () => {
+    if (multiExec) return setMultiExec(false);
+    if (participants.length < 2) return flash('Multi-execute needs two or more connected sessions on screen. Pick the 2 or 4 pane view first.');
+    const ok = window.confirm(
+      `Multi-execute sends everything you type in the focused pane to ${participants.length - 1} other session${participants.length > 2 ? 's' : ''}.\n\n`
+      + 'Keyboard only (RDP to RDP, SSH to SSH). Be careful on production servers.\n\nTurn it on?',
+    );
+    if (ok) setMultiExec(true);
+  };
 
   const openTab = (conn, extra = {}) => {
     const key = `${conn.id || conn.host}-${Date.now()}`;
@@ -158,7 +188,7 @@ export default function App() {
   };
 
   const paneProps = (slot, key) => ({
-    className: `pane${slot === focusPane ? ' pane-focused' : ''}${dropSlot === slot ? ' pane-drop' : ''}`,
+    className: `pane${slot === focusPane ? ' pane-focused' : ''}${dropSlot === slot ? ' pane-drop' : ''}${multiExec && key && participants.includes(key) ? ' pane-multi' : ''}`,
     style: cell(slot),
     onMouseDownCapture: () => {
       if (slot !== focusPane) setFocusPane(slot);
@@ -363,8 +393,19 @@ export default function App() {
                   <LayoutIcon n={n} />
                 </button>
               ))}
+              <button className={`multi-toggle${multiExec ? ' on' : ''}`} onClick={toggleMulti} aria-pressed={multiExec} disabled={!split && !multiExec}
+                title={split ? 'Multi-execute: type once, send to all included panes' : 'Multi-execute needs the 2 or 4 pane view'}>
+                ⇉ Multi
+              </button>
             </div>
           </div>
+
+          {multiExec && showGrid && (
+            <div className="multi-banner" role="status">
+              <span><strong>Multi-execute is ON.</strong> Keys typed in the focused pane go to all {participants.length} included sessions (RDP to RDP, SSH to SSH). Mouse is not shared.</span>
+              <button onClick={() => setMultiExec(false)}>Stop</button>
+            </div>
+          )}
 
           <div className={`panes${showGrid ? ` split split-${layout}` : ''}`}>
             {activeTab === 'dashboard' && (
@@ -393,9 +434,14 @@ export default function App() {
               const visible = showGrid ? slot >= 0 : activeTab === t.key;
               const focused = visible && (!showGrid || slot === focusPane);
               const pane = showGrid && slot >= 0 ? paneProps(slot, t.key) : undefined;
+              const multi = {
+                active: multiExec && showGrid && slot >= 0,
+                included: !excluded.includes(t.key),
+                toggle: () => setExcluded((x) => (x.includes(t.key) ? x.filter((k) => k !== t.key) : [...x, t.key])),
+              };
               return t.conn.type === 'ssh'
-                ? <SshSession key={t.key} tab={t} active={visible} focused={focused} pane={pane} onStatus={setStatus} onSession={setSession} />
-                : <RdpTab key={t.key} tab={t} active={visible} focused={focused} pane={pane} onStatus={setStatus} />;
+                ? <SshSession key={t.key} tab={t} active={visible} focused={focused} pane={pane} bus={bus} multi={multi} onStatus={setStatus} onSession={setSession} />
+                : <RdpTab key={t.key} tab={t} active={visible} focused={focused} pane={pane} bus={bus} multi={multi} onStatus={setStatus} />;
             })}
           </div>
         </main>

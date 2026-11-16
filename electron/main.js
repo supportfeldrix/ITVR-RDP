@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, protocol, net: enet } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, clipboard, net: enet } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -135,6 +135,20 @@ ipcMain.handle('rdm:commit', (_e, token) => {
   if (!bundle) throw new Error('Import expired. Please select the file again.');
   pendingImports.delete(String(token));
   return store.importBundle(bundle);
+});
+
+// ---- IPC: clipboard ----
+// The system clipboard is read/written here, not with navigator.clipboard: the web API needs
+// window focus and a permission grant and fails silently otherwise, which made RDP paste flaky.
+const MAX_CLIP = 10 * 1024 * 1024;
+ipcMain.handle('clipboard:readText', () => {
+  const t = clipboard.readText();
+  return t.length > MAX_CLIP ? t.slice(0, MAX_CLIP) : t;
+});
+ipcMain.handle('clipboard:writeText', (_e, text) => {
+  if (typeof text !== 'string') return false;
+  clipboard.writeText(text.length > MAX_CLIP ? text.slice(0, MAX_CLIP) : text);
+  return true;
 });
 
 ipcMain.handle('dialog:pickKey', async () => {
