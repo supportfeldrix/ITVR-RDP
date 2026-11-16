@@ -283,6 +283,68 @@ function finish(code) {
   await js(`document.querySelector('.layout-switch button:nth-child(1)').click(); true`); // back to single view
   assert.ok(await waitFor(`!document.querySelector('.multi-banner')`), 'multi-execute must turn off when leaving split view');
   step('multi-execute turns itself off when leaving split view');
+
+  // ---- SSH terminal clipboard: copy out of the terminal, paste into it ----
+  const mouse = (type, x, y, extra = {}) => call('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, ...extra });
+  const rowRect = await js(`(() => {
+    const rows = [...document.querySelectorAll('.session[style*="flex"] .xterm-rows > div')];
+    const row = rows.find((r) => r.textContent.trim().length > 0);
+    if (!row) return null;
+    const r = row.getBoundingClientRect();
+    return { left: r.left, right: r.right, y: r.top + r.height / 2 };
+  })()`);
+  if (!rowRect) {
+    const dbg = await js(`(() => ({
+      sessions: [...document.querySelectorAll('.panes > .session')].map((s) => ({ style: s.getAttribute('style'), rows: s.querySelectorAll('.xterm-rows > div').length, text: (s.querySelector('.xterm-rows')?.innerText || '').slice(0, 120), canvases: s.querySelectorAll('canvas').length })),
+      layout: document.querySelector('.layout-switch .on') ? 'has .on' : 'none', split: !!document.querySelector('.panes.split'),
+    }))()`);
+    assert.fail(`the terminal should show the text typed earlier. Page state: ${JSON.stringify(dbg)}`);
+  }
+
+  await js(`window.api.clipboardWrite('SENTINEL-BEFORE'); true`);
+  await mouse('mousePressed', rowRect.left + 2, rowRect.y);
+  await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rowRect.left + 120, y: rowRect.y, button: 'left', buttons: 1 });
+  await mouse('mouseReleased', rowRect.left + 120, rowRect.y);
+  await sleep(500);
+  const copied = await js(`window.api.clipboardRead()`);
+  assert.ok(/pasted-text|echo/.test(copied) && copied !== 'SENTINEL-BEFORE', `selecting text should copy it to the clipboard, got ${JSON.stringify(copied)}`);
+  step(`SSH terminal: selecting text copies it ("${copied.trim()}")`);
+
+  // Ctrl+C with a selection copies and must NOT send an interrupt to the server
+  await js(`window.api.clipboardWrite('SENTINEL-CTRL-C'); true`);
+  const beforeCtrlC = received.map((r) => (r.data.match(/\x03/g) || []).length);
+  await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
+  await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
+  await sleep(500);
+  const copied2 = await js(`window.api.clipboardRead()`);
+  assert.ok(/pasted-text|echo/.test(copied2), `Ctrl+C with a selection should copy it, got ${JSON.stringify(copied2)}`);
+  assert.deepStrictEqual(received.map((r) => (r.data.match(/\x03/g) || []).length), beforeCtrlC, 'Ctrl+C with a selection must not send ^C to the server');
+  step('SSH terminal: Ctrl+C copies when text is selected (no interrupt sent)');
+
+  // With nothing selected Ctrl+C is still the interrupt
+  await mouse('mousePressed', rowRect.left + 2, rowRect.y + 40); await mouse('mouseReleased', rowRect.left + 2, rowRect.y + 40); // click clears the selection
+  await sleep(200);
+  await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
+  await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
+  assert.ok(await (async () => { for (let i = 0; i < 20; i++) { if (received.some((r, n) => (r.data.match(/\x03/g) || []).length > beforeCtrlC[n])) return true; await sleep(250); } return false; })(),
+    'Ctrl+C without a selection should still send ^C to the server');
+  step('SSH terminal: Ctrl+C with nothing selected still interrupts');
+
+  // Right-click pastes when nothing is selected; Ctrl+V pastes too; neither may double-insert
+  const countOf = (needle) => received.reduce((n, r) => n + (r.data.split(needle).length - 1), 0);
+  await js(`window.api.clipboardWrite('RIGHT-CLICK-PASTE'); true`);
+  await mouse('mousePressed', rowRect.left + 5, rowRect.y + 40, { button: 'right', buttons: 2 });
+  await mouse('mouseReleased', rowRect.left + 5, rowRect.y + 40, { button: 'right', buttons: 0 });
+  await sleep(800);
+  assert.strictEqual(countOf('RIGHT-CLICK-PASTE'), 1, `right-click should paste exactly once, got ${countOf('RIGHT-CLICK-PASTE')}`);
+  step('SSH terminal: right-click pastes the clipboard');
+
+  await js(`window.api.clipboardWrite('CTRL-V-PASTE'); document.querySelector('.session[style*="flex"] .xterm-helper-textarea').focus(); true`);
+  await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2 });
+  await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2 });
+  await sleep(800);
+  assert.strictEqual(countOf('CTRL-V-PASTE'), 1, `Ctrl+V should paste exactly once, got ${countOf('CTRL-V-PASTE')}`);
+  step('SSH terminal: Ctrl+V pastes the clipboard once');
   sshServer.close();
 
   const real = errors.filter((e) => !/Autofill|DevTools/.test(e));

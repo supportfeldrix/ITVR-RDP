@@ -2,6 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 
+const IS_MAC = window.api?.platform === 'darwin';
+
 // One SSH session rendered in an xterm.js terminal. Stays mounted while hidden
 // so the session survives tab switches.
 export default function TerminalTab({ tab, active, focused = active, onStatus, onSession, bus }) {
@@ -37,6 +39,47 @@ export default function TerminalTab({ tab, active, focused = active, onStatus, o
     const host = hostRef.current;
     for (const ev of ['keydown', 'input', 'paste', 'compositionend']) host.addEventListener(ev, markUser, true);
 
+    // ---- clipboard, the way PuTTY / Windows Terminal / MobaXterm behave ----
+    //  * selecting text with the mouse copies it
+    //  * Ctrl+C copies when text is selected, otherwise it is the usual interrupt (^C) for the server
+    //  * Ctrl+Shift+C / Ctrl+Insert always copy; Ctrl+V / Ctrl+Shift+V / Shift+Insert paste
+    //  * right-click copies the selection, or pastes when nothing is selected
+    // (Cmd replaces Ctrl on a Mac.) The system clipboard is reached through the main process.
+    const copySelection = () => {
+      const text = term.getSelection();
+      if (text) window.api.clipboardWrite(text).catch(() => {});
+      return !!text;
+    };
+    const pasteClipboard = async () => {
+      try {
+        const text = await window.api.clipboardRead();
+        if (text) { markUser(); term.paste(text); }
+      } catch { /* clipboard unavailable */ }
+    };
+    const onMouseUp = () => { if (term.hasSelection()) copySelection(); };
+    const onContextMenu = (e) => {
+      e.preventDefault();
+      if (term.hasSelection()) { copySelection(); term.clearSelection(); } else pasteClipboard();
+    };
+    host.addEventListener('mouseup', onMouseUp);
+    host.addEventListener('contextmenu', onContextMenu);
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if ((mod && k === 'c' && (e.shiftKey || term.hasSelection())) || (e.ctrlKey && k === 'Insert')) {
+        e.preventDefault();
+        copySelection();
+        return false;
+      }
+      if ((mod && k === 'v') || (e.shiftKey && !e.ctrlKey && k === 'Insert')) {
+        e.preventDefault(); // stop the browser's own paste so the text is not inserted twice
+        pasteClipboard();
+        return false;
+      }
+      return true;
+    });
+
     window.api
       .sshOpen({ id: tab.conn.id, cols: term.cols, rows: term.rows, password: tab.password, username: tab.promptUser })
       .then(({ sessionId }) => {
@@ -71,6 +114,8 @@ export default function TerminalTab({ tab, active, focused = active, onStatus, o
     return () => {
       disposed = true;
       for (const ev of ['keydown', 'input', 'paste', 'compositionend']) host.removeEventListener(ev, markUser, true);
+      host.removeEventListener('mouseup', onMouseUp);
+      host.removeEventListener('contextmenu', onContextMenu);
       offBus();
       ro.disconnect();
       offData();
